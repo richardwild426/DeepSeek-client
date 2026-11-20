@@ -1,0 +1,53 @@
+name: NSH 0.5.1 CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: web
+          - runner: macos-15
+            target: macos
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NSH 0.5.1
+        env:
+          NSH_VERSION: v0.5.1
+        run: |
+          curl --fail --silent --show-error --location --retry 3 https://nsh.dev/install.sh -o "$RUNNER_TEMP/nsh-install.sh"
+          sh "$RUNNER_TEMP/nsh-install.sh"
+          echo "$HOME/.nsh/bin" >> "$GITHUB_PATH"
+      - name: Verify version and types
+        run: |
+          nsh --version | grep -E '^nsh 0\.5\.1( |$)'
+          nsh check
+      - name: Run official headless tests
+        run: nsh test --junit "$RUNNER_TEMP/nsh-headless.xml"
+      - name: Package and verify locally
+        env:
+          PACKAGE_TARGET: ${{ matrix.target }}
+        run: |
+          nsh package --target "$PACKAGE_TARGET"
+          if [ "$PACKAGE_TARGET" = web ]; then
+            test -s .nsh/out/砚台/index.html
+            nsh package --target linux --out .nsh/out/linux
+            test -s .nsh/out/linux/砚台.tar.gz
+          else
+            test -s .nsh/out/砚台.app/Contents/Resources/nsh/bundle.nshc
+            codesign --verify --strict .nsh/out/砚台.app
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nsh-headless-${{ matrix.target }}
+          path: ${{ runner.temp }}/nsh-headless.xml

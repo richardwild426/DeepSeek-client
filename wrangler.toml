@@ -1,0 +1,11 @@
+name = "yantai"
+compatibility_date = "2025-11-01"
+workers_dev = true
+
+routes = [
+  { pattern = "ds.zvector.top", custom_domain = true }
+]
+
+[assets]
+directory = "./.nsh/out/web-dist/砚台"
+not_found_handling = "single-page-application"

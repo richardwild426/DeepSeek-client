@@ -1,0 +1,13 @@
+{
+  "name": "砚台",
+  "id": "app.yantai.deepseek",
+  "version": "1.0.0",
+  "build": 1,
+  "capabilities": {
+    "network": { "hosts": ["api.deepseek.com"] },
+    "openUrl": { "schemes": ["https", "http"] },
+    "picker": true,
+    "clipboard": true,
+    "process": { "execute": ["/usr/bin/security"] }
+  }
+}
