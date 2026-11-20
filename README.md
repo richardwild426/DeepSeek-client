@@ -1,14 +1,14 @@
 # 砚台
 
-砚台是基于 NSH 0.5.1 的 DeepSeek 客户端。请求直连 `api.deepseek.com`，连接设置中的「加载余额与模型」可查询账户余额与可用模型。输入密钥本身不会发起请求。
+砚台是基于 NSH 0.5.1 的 DeepSeek 客户端。请求直连 `api.deepseek.com`，「数据管理」中的「账户余额与模型」可查询账户余额与可用模型。首次启动默认打开「数据管理」。输入密钥本身不会发起请求。
 
 ## 使用
 
-- 在连接设置中切换思考、搜索和读链接。思考过程可以展开查看。网页工具由 DeepSeek Flash 执行，返回的引用可点击打开，已读页面可在后续消息中继续引用。[DeepSeek 网页工具](https://api-docs.deepseek.com/guides/web_tools) · [思考模式](https://api-docs.deepseek.com/guides/thinking_mode)
-- 「选图片 / PDF」将文件加入草稿。每轮最多四件，每件最大 20 MiB。选择本身不会上传，发送时才使用官方 Files API。支持 JPEG、PNG、GIF、WebP 和 PDF。PDF 使用正文识别，图片与 PDF 都使用 DeepSeek Flash。云端文件设为七天过期。过期或切换到其他账户后，如需继续依据附件问答，请在新对话中重新添加文件。[DeepSeek Files API](https://api-docs.deepseek.com/guides/files_api) · [文档解析](https://api-docs.deepseek.com/guides/document_parsing)
-- 历史记录保存在本设备。新建对话后可以切回旧对话。「导出 JSON」将全部历史复制到剪贴板，复制受限时显示可手动选择的 JSON。导出包含对话正文、思考、引用、工具状态和附件元数据。历史处理会移除工具请求中的鉴权头，以及内嵌附件数据（包括 data URL）。
-- 恢复备份时，点击「导入 JSON」，粘贴砚台导出的 v2 JSON、旧版 v1（`messages`）或旧版单会话消息数组，再点击「校验 JSON」。摘要显示将新增、跳过以及因 ID 冲突而重新分配 ID 的对话数。按消息内容识别重复记录。点击「确认导入」后，保存成功的对话可在「历史」中查看或再次导出。导入全程在本机进行，合并后保留当前对话和草稿。
-- macOS 连接设置支持显式保存、读取和清除钥匙串中的 API Key。其他平台的密钥仅保留在当前进程或页面的内存中。
+- 输入框提供独立的深度思考和智能搜索开关。填写密钥后也可开启读链接。思考过程可以展开查看。网页工具由 DeepSeek Flash 执行，返回的引用可点击打开，已读页面可在后续消息中继续引用。[DeepSeek 网页工具](https://api-docs.deepseek.com/guides/web_tools) · [思考模式](https://api-docs.deepseek.com/guides/thinking_mode)
+- 输入框的附件按钮将文件加入草稿。每轮最多四件，每件最大 20 MiB。选择本身不会上传，发送时才使用官方 Files API。支持 JPEG、PNG、GIF、WebP 和 PDF。PDF 使用正文识别，图片与 PDF 都使用 DeepSeek Flash。云端文件设为七天过期。过期或切换到其他账户后，如需继续依据附件问答，请在新对话中重新添加文件。[DeepSeek Files API](https://api-docs.deepseek.com/guides/files_api) · [文档解析](https://api-docs.deepseek.com/guides/document_parsing)
+- 历史记录保存在本设备。新建对话后可以切回旧对话。「数据管理」的「复制」将全部历史导出为 JSON 并写入剪贴板，复制受限时显示可手动选择的 JSON。导出包含对话正文、思考、引用、工具状态和附件元数据。历史处理会移除工具请求中的鉴权头，以及内嵌附件数据（包括 data URL）。「删除所有对话」需要二次确认。
+- 恢复备份时，点击「上传」打开导入面板，选择 JSON 文件，或粘贴砚台导出的 v2 JSON、旧版 v1（`messages`）或旧版单会话消息数组后点击「校验 JSON」。摘要显示将新增、跳过以及因 ID 冲突而重新分配 ID 的对话数。按消息内容识别重复记录。点击「确认导入」后，保存成功的对话可在「历史」中查看或再次导出。导入全程在本机进行，合并后保留当前对话和草稿。
+- macOS 的「数据管理」支持显式保存、读取和清除钥匙串中的 API Key。其他平台的密钥仅保留在当前进程或页面的内存中。
 
 ## 线上部署
 
@@ -22,7 +22,7 @@ scripts/deploy-web.sh
 
 脚本会执行 `nsh package --target web --out .nsh/out/web-dist`，再用 `npx wrangler@latest deploy` 发布，最后请求一次线上首页确认 200。
 
-界面配色、桌面与窄屏布局及设置结构见 [砚台界面设计](DESIGN.md)。
+界面基于授权的 DeepSeek API 使用 Demo 截图实现。配色、桌面与窄屏布局、设置结构和本地验收记录见 [砚台界面设计](DESIGN.md)。语音输入取决于系统听写能力，官方 ZIP 备份暂不支持。
 
 ## 本地构建和验收
 

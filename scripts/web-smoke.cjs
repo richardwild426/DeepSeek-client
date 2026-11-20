@@ -37,15 +37,39 @@ async function smoke(context, viewport, colorScheme) {
   assert.equal(response.status(), 200);
   assert.match(response.headers()['content-type'], /^text\/html/);
   assert.equal(await page.title(), '砚台');
-  await visible('开始一段对话');
   const narrow = viewport.width < 720;
-  const ink = colorScheme === 'dark' ? 'rgb(237, 244, 246)' : 'rgb(29, 41, 49)';
+  await id('key').locator('input[type=password]').waitFor();
+  await id('close-settings').click();
+  await id('welcome').waitFor();
+  const ink = colorScheme === 'dark' ? 'rgb(249, 250, 251)' : 'rgb(16, 20, 26)';
   const input = id('question').locator('textarea');
   const inputBox = await input.boundingBox();
-  assert.ok(inputBox.y > viewport.height / 2, '输入区应靠近底部');
+  assert.equal(inputBox.y > viewport.height / 2, narrow, '空白对话桌面居中，窄屏输入区靠近底部');
   assert.equal(await input.evaluate((field) => getComputedStyle(field).color), ink);
   assert.equal(await id('history-panel').isVisible(), !narrow);
   assert.equal(await id('menu').isVisible(), narrow);
+  for (const pattern of [/\/app\.[\da-f]+\.js$/, /\/nsh\.[\da-f]+\.js$/, /\/nsh\.[\da-f]+\.wasm$/]) {
+    const asset = [...assets].find(([path]) => pattern.test(path));
+    assert.equal(asset?.[1], 200, `Missing HTTP 200 for ${pattern}`);
+    console.log(`HTTP 200 ${asset[0]}`);
+  }
+  console.log(`首屏：HTTP 200 ${url.href}，砚台空状态可见`);
+
+  if (narrow) await id('menu').click();
+  await id('settings').click();
+  const keyField = id('key').locator('input[type=password]');
+  await keyField.waitFor({ state: 'visible' });
+  assert.equal(await keyField.evaluate((field) => getComputedStyle(field).color), ink);
+  const [panelBox, keyBox] = await Promise.all([id('settings-panel').boundingBox(), id('key').boundingBox()]);
+  assert.ok(panelBox.x >= 0 && panelBox.x + panelBox.width <= viewport.width + 1);
+  assert.ok(keyBox.width > panelBox.width * 0.65, '密钥输入应占用设置内容的大部分宽度');
+  await id('settings-tab-general').click();
+  await keyField.waitFor({ state: 'hidden' });
+  await id('theme-system').waitFor();
+  await id('settings-tab-data').click();
+  await keyField.fill('fake-browser-fixture-key');
+  await visible('密钥仅保留在当前会话内存中。');
+  await id('close-settings').click();
   await id('thinking').click();
   assert.equal(await id('thinking').getAttribute('aria-pressed'), 'true');
   await id('search').click();
@@ -55,24 +79,9 @@ async function smoke(context, viewport, colorScheme) {
   await id('search').click();
   assert.equal(await id('search').getAttribute('aria-pressed'), 'false');
   assert.equal(await id('read-links').getAttribute('aria-pressed'), 'true');
-  for (const pattern of [/\/app\.[\da-f]+\.js$/, /\/nsh\.[\da-f]+\.js$/, /\/nsh\.[\da-f]+\.wasm$/]) {
-    const asset = [...assets].find(([path]) => pattern.test(path));
-    assert.equal(asset?.[1], 200, `Missing HTTP 200 for ${pattern}`);
-    console.log(`HTTP 200 ${asset[0]}`);
-  }
-  console.log(`首屏：HTTP 200 ${url.href}，砚台空状态可见`);
-
+  if (narrow) await id('menu').click();
   await id('settings').click();
-  const keyField = id('key').locator('input[type=password]');
-  await keyField.waitFor({ state: 'visible' });
-  await visible('密钥仅保留在当前会话内存中。');
-  assert.equal(await keyField.evaluate((field) => getComputedStyle(field).color), ink);
-  const [panelBox, keyBox] = await Promise.all([id('settings-panel').boundingBox(), keyField.boundingBox()]);
-  assert.ok(panelBox.x >= 0 && panelBox.x + panelBox.width <= viewport.width + 1);
-  assert.ok(keyBox.width > panelBox.width * 0.75, '密钥输入应占用设置内容的大部分宽度');
-  await id('settings-tab-data').click();
-  await keyField.waitFor({ state: 'hidden' });
-  console.log('设置：密钥掩码与配色正确，切换到备份');
+  console.log('设置：密钥掩码与配色正确，通用设置与数据管理可切换');
 
   await id('import').click();
   await id('import-json').locator('textarea').fill(JSON.stringify(backup, null, 2));
@@ -116,6 +125,7 @@ async function smoke(context, viewport, colorScheme) {
         : window.getSelection().toString();
     });
   });
+  if (narrow) await id('menu').click();
   await id('settings').click();
   await id('settings-tab-data').click();
   await id('export').click();
@@ -125,8 +135,9 @@ async function smoke(context, viewport, colorScheme) {
   console.log('导出：捕获 Chromium copy 事件，选中的 JSON 与合成备份逐字段一致');
 
   await id('close-settings').click();
+  if (narrow) await id('menu').click();
   await id('new').click();
-  await visible('开始一段对话');
+  await id('welcome').waitFor();
   assert.equal(await id('history-panel').isVisible(), !narrow);
   assert.deepEqual(externalRequests, []);
   assert.deepEqual(pageErrors, []);

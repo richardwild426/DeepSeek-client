@@ -7,6 +7,7 @@
     "network": { "hosts": ["api.deepseek.com"] },
     "openUrl": { "schemes": ["https", "http"] },
     "picker": true,
+    "speech": true,
     "clipboard": true,
     "process": { "execute": ["/usr/bin/security"] }
   }

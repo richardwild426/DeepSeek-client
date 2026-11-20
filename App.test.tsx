@@ -10,7 +10,7 @@ const stream = (parts: string[]) => parts.map((content) =>
 ).join("") + "data: [DONE]\r\n\r\n";
 
 async function setKey(app: App) {
-  await app.press("id:settings");
+  await openData(app);
   await app.type("id:key", "fake-test-key");
   await app.press("id:close-settings");
 }
@@ -39,15 +39,21 @@ test("SSE decodes UTF-8 and CRLF split across byte chunks", async () => {
 
 test("platform smoke renders and opens settings", async () => {
   const app = await open("./App.tsx");
-  await app.waitFor("text:砚台");
-  await app.press("id:settings");
   await app.waitFor("id:key");
-  await app.waitFor("text:DeepSeek Flash");
+  expect(app.shows("id:import")).toBe(true);
+  await app.press("id:settings-tab-general");
+  await app.waitFor("id:theme-system");
+  await app.press("id:close-settings");
+  await app.press("id:menu");
+  await app.waitFor("text:API 使用 demo");
+  await openData(app);
+  await app.waitFor("id:key");
 });
 
 test("narrow Web opens settings without sending an unauthenticated request", async () => {
   const app = await open("./App.tsx", { platform: "web", width: 320, network: {} });
-  await app.waitFor("text:砚台");
+  await app.waitFor("id:key");
+  await app.press("id:close-settings");
   await ask(app, "你好");
   await app.waitFor("text:请先填写 API Key。");
   expect(app.requests()).toEqual([]);
@@ -87,7 +93,7 @@ test("macOS assembles SSE, sends multi-turn context and resets the conversation"
     ],
   });
   await app.press("id:new");
-  await app.waitFor("text:开始一段对话");
+  await app.waitFor("text:今天有什么可以帮到你？");
   expect(app.shows("青山")).toBe(false);
 });
 
@@ -135,7 +141,7 @@ test("loads account information only on request and uses a returned model", asyn
   } });
   await setKey(app);
   expect(app.requests()).toHaveLength(0);
-  await app.press("id:settings");
+  await openData(app);
   await app.press("id:account");
   await app.waitFor("text:账户可用 · CNY 10.50");
   await app.waitFor("id:fixture-model");
@@ -198,6 +204,7 @@ test("migrates legacy history, switches conversations, and exports without crede
   } });
   await app.waitFor("text:旧答案");
   expect(JSON.parse(app.storage()[historyKey]).active).toBe("legacy");
+  if (app.shows("id:menu")) await app.press("id:menu");
   await app.press("id:new");
   await setKey(app);
   await ask(app, "新问题");
@@ -247,7 +254,7 @@ test("macOS loads and clears a mocked Keychain credential without persisting it"
       return { code: 0, stdout: args[0] === "find-generic-password" ? "fake-vault-key\n" : "", stderr: "" };
     } } },
   });
-  await app.press("id:settings");
+  await openData(app);
   await app.press("id:vault-load");
   await app.waitFor("text:已从钥匙串读取。");
   await app.press("id:vault-delete");
@@ -261,6 +268,8 @@ test("macOS loads and clears a mocked Keychain credential without persisting it"
 
 test("invalid attachments are rejected before a request", async () => {
   const app = await open("./App.tsx", { network: {} });
+  await app.waitFor("id:key");
+  await app.press("id:close-settings");
   app.onPick(() => [{ ...fixturePdf, data: new TextEncoder().encode("not a PDF") }]);
   await app.press("id:attach");
   await app.waitFor("text:请选择有效的 JPEG、PNG、GIF、WebP 或 PDF 文件。");
@@ -319,7 +328,10 @@ const originalStorage = { [historyKey]: JSON.stringify(localHistory) };
 const importFailure = "导入保存失败，可能是存储空间不足。现有历史和草稿已保留。";
 
 async function openData(app: App) {
-  if (!app.shows("id:settings-tab-data")) await app.press("id:settings");
+  if (!app.shows("id:settings-tab-data")) {
+    if (!app.shows("id:settings") && app.shows("id:menu")) await app.press("id:menu");
+    if (!app.shows("id:settings-tab-data")) await app.press("id:settings");
+  }
   if (!app.shows("id:import")) await app.press("id:settings-tab-data");
 }
 
@@ -406,7 +418,7 @@ test("imports a v2 backup locally, reopens it and exports all supported fields",
 for (const [format, source] of [["v1", legacyConversation], ["单会话数组", legacyConversation.messages]] as const) {
   test(`imports ${format} and retains it after reopening`, async () => {
     const app = await open("./App.tsx", { network: {} });
-    await app.waitFor("text:砚台");
+    await app.waitFor("id:key");
     await previewJson(app, JSON.stringify(source));
     await app.waitFor(`text:${format} · 新增 1 · 重复 0 · ID 冲突 0`);
     await app.press("id:confirm-import");
@@ -514,4 +526,62 @@ test("history writes wait for earlier writes and recover from rejection", async 
   expect(await failed).toBe("fixture write rejection");
   await retry;
   expect(started).toEqual(["earlier", "import", "retry"]);
+});
+
+test("closing first-run setup preserves the home screen on relaunch", async () => {
+  const app = await open("./App.tsx", { platform: "web", network: {} });
+  await app.waitFor("id:key");
+  await app.press("id:close-settings");
+  const reopened = await open("./App.tsx", { platform: "web", storage: app.storage(), network: {} });
+  await reopened.waitFor("id:welcome");
+  expect(reopened.shows("id:settings-panel")).toBe(false);
+  expect(reopened.requests()).toEqual([]);
+});
+
+test("delete all confirms before removing current and legacy history while preserving the draft", async () => {
+  const app = await open("./App.tsx", { storage: { ...originalStorage, [legacyKey]: JSON.stringify(legacyConversation) }, network: {} });
+  await app.waitFor("text:本机答案");
+  await app.type("id:question", "保留草稿");
+  await openData(app);
+  const before = app.storage();
+  await app.press("id:delete-history");
+  await app.press("id:cancel-delete-history");
+  expect(app.storage()).toEqual(before);
+  await app.press("id:delete-history");
+  await app.press("id:confirm-delete-history");
+  await app.waitFor("text:已删除所有对话。");
+  expect(JSON.parse(app.storage()[historyKey])).toEqual(emptyHistory());
+  expect(app.storage()[legacyKey]).toBe(undefined);
+  await app.press("id:close-settings");
+  expect(app.value("id:question")).toBe("保留草稿");
+  expect(app.shows("text:本机答案")).toBe(false);
+  expect(app.requests()).toEqual([]);
+});
+
+test("dictation appends recognized speech to the draft without sending", async () => {
+  const app = await open("./App.tsx", { platform: "ios", network: {}, storage: originalStorage });
+  await app.waitFor("text:本机答案");
+  await app.type("id:question", "已有草稿");
+  await app.press("id:dictate");
+  await app.waitUntil(() => app.speechRequests().length === 1);
+  await app.hear("合成语音");
+  await app.endSpeech();
+  expect(app.value("id:question")).toBe("已有草稿 合成语音");
+  expect(app.requests()).toEqual([]);
+});
+
+test("selecting a JSON backup previews it before saving", async () => {
+  const app = await open("./App.tsx", { platform: "web", network: {}, storage: originalStorage });
+  await app.waitFor("text:本机答案");
+  await openData(app);
+  await app.press("id:import");
+  app.onPick(() => [{ name: "synthetic-history.json", type: "application/json",
+    data: new TextEncoder().encode(JSON.stringify(legacyConversation)) }]);
+  await app.press("id:choose-backup");
+  await app.waitFor("text:v1 · 新增 1 · 重复 0 · ID 冲突 0");
+  expect(app.storage()).toEqual(originalStorage);
+  await app.press("id:confirm-import");
+  await app.waitFor("text:已导入 1 个对话。");
+  expect(JSON.parse(app.storage()[historyKey]).conversations).toHaveLength(2);
+  expect(app.requests()).toEqual([]);
 });
