@@ -1,0 +1,205 @@
+name: Package GitHub Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    if: github.event_name == 'workflow_dispatch' || !github.event.deleted
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      android: ${{ steps.plan.outputs.android }}
+      ios: ${{ steps.plan.outputs.ios }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          ENABLE_ANDROID: ${{ vars.RELEASE_ANDROID_SIGNED }}
+          ENABLE_IOS: ${{ vars.RELEASE_IOS_DEVICE }}
+        run: python3 scripts/release.py plan
+
+  package:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: macos-arm64, runner: macos-15, arch: ARM64, nsh: macos-arm64}
+          - {target: macos-x64, runner: macos-15-intel, arch: X64, nsh: macos-x86_64}
+          - {target: windows-x64, runner: windows-2022, arch: X64, nsh: windows-x86_64}
+          - {target: linux-x64, runner: ubuntu-24.04, arch: X64, nsh: linux-x86_64}
+          - {target: web, runner: ubuntu-24.04, arch: X64, nsh: linux-x86_64}
+          - {target: android, runner: ubuntu-24.04, arch: X64, nsh: linux-x86_64}
+          - {target: ios-simulator-arm64, runner: macos-15, arch: ARM64, nsh: macos-arm64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      ANDROID_MODE: ${{ needs.plan.outputs.android }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned NSH distribution and runtime
+        if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
+        env:
+          NSH_PLATFORM: ${{ matrix.nsh }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: python scripts/release.py install
+      - name: Prepare Android Build Tools
+        if: matrix.target == 'android' && needs.plan.outputs.android == 'test'
+        run: sdkmanager 'build-tools;35.0.1' 'platforms;android-35'
+      - name: Package and verify (no signing secrets)
+        if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
+        run: python scripts/release.py package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
+        with:
+          name: package-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  android-signed:
+    needs: plan
+    if: needs.plan.outputs.android == 'signed'
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    timeout-minutes: 20
+    env:
+      TARGET: android
+      VERSION: ${{ needs.plan.outputs.version }}
+      ANDROID_MODE: signed
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned NSH distribution and Android runtime
+        env:
+          NSH_PLATFORM: linux-x86_64
+          EXPECTED_ARCH: X64
+        run: python3 scripts/release.py install
+      - name: Prepare Android Build Tools
+        run: sdkmanager 'build-tools;35.0.1' 'platforms;android-35'
+      - name: Package and verify signed Android APK
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_CERT_SHA256: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: python3 scripts/release.py package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-android
+          path: release-assets/*
+          if-no-files-found: error
+
+  ios-device:
+    needs: plan
+    if: needs.plan.outputs.ios == 'signed'
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 20
+    env:
+      TARGET: ios-device-arm64
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned NSH distribution and iOS runtime
+        env:
+          NSH_PLATFORM: macos-arm64
+          EXPECTED_ARCH: ARM64
+        run: python3 scripts/release.py install
+      - name: Build and verify device IPA
+        env:
+          IOS_CERTIFICATE_P12_B64: ${{ secrets.IOS_CERTIFICATE_P12_B64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_B64 }}
+        run: python3 scripts/release.py package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-ios-device-arm64
+          path: release-assets/*
+          if-no-files-found: error
+
+  verify-assets:
+    needs: [plan, package, android-signed, ios-device]
+    if: >-
+      !cancelled() && needs.plan.result == 'success' && needs.package.result == 'success' &&
+      (needs.android-signed.result == 'success' || needs.android-signed.result == 'skipped') &&
+      (needs.ios-device.result == 'success' || needs.ios-device.result == 'skipped')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: package-*
+          path: downloaded
+      - name: Verify asset inventory and generate SHA256SUMS
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          ANDROID_MODE: ${{ needs.plan.outputs.android }}
+          IOS_MODE: ${{ needs.plan.outputs.ios }}
+        run: python3 scripts/release.py collect
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-release-assets
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    needs: verify-assets
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-release-assets
+          path: release-assets
+      - name: Verify checksums and publish existing tag
+        working-directory: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha256sum --strict --check SHA256SUMS
+          # Verify that the remote tag still points to the object that triggered this run.
+          read -r object_type object_sha < <(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME" \
+            --jq '.object | [.type, .sha] | @tsv')
+          while [[ "$object_sha" != "$GITHUB_SHA" && "$object_type" == tag ]]; do
+            read -r object_type object_sha < <(gh api "repos/$GH_REPO/git/tags/$object_sha" \
+              --jq '.object | [.type, .sha] | @tsv')
+          done
+          if [[ "$object_sha" != "$GITHUB_SHA" ]]; then
+            echo 'Remote tag no longer points to this build.' >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'Release already exists. Refusing to replace it.' >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes \
+            --notes-file RELEASE-ASSETS.md --title "砚台 $GITHUB_REF_NAME" ./*
+          gh release edit "$GITHUB_REF_NAME" --draft=false
