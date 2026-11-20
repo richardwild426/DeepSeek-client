@@ -45,37 +45,57 @@ jobs:
           - {target: windows-x64, runner: windows-2022, arch: X64, nsh: windows-x86_64}
           - {target: linux-x64, runner: ubuntu-24.04, arch: X64, nsh: linux-x86_64}
           - {target: web, runner: ubuntu-24.04, arch: X64, nsh: linux-x86_64}
-          - {target: android, runner: ubuntu-24.04, arch: X64, nsh: linux-x86_64}
           - {target: ios-simulator-arm64, runner: macos-15, arch: ARM64, nsh: macos-arm64}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.plan.outputs.version }}
-      ANDROID_MODE: ${{ needs.plan.outputs.android }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - name: Install pinned NSH distribution and runtime
-        if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
         env:
           NSH_PLATFORM: ${{ matrix.nsh }}
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: python scripts/release.py install
+      - name: Package and verify
+        run: python scripts/release.py package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  android-debug:
+    needs: plan
+    if: needs.plan.outputs.android == 'debug'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET: android
+      VERSION: ${{ needs.plan.outputs.version }}
+      ANDROID_MODE: debug
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned NSH distribution and Android runtime
+        env:
+          NSH_PLATFORM: linux-x86_64
+          EXPECTED_ARCH: X64
+        run: python3 scripts/release.py install
       - name: Prepare Android Build Tools
-        if: matrix.target == 'android' && needs.plan.outputs.android == 'test'
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           log-accepted-android-sdk-licenses: false
           packages: 'build-tools;35.0.1 platforms;android-35'
-      - name: Package and verify (no signing secrets)
-        if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
-        run: python scripts/release.py package
+      - name: Package and verify sideloadable APK
+        run: python3 scripts/release.py package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
         with:
-          name: package-${{ matrix.target }}
+          name: package-android-debug
           path: release-assets/*
           if-no-files-found: error
 
@@ -116,11 +136,10 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-  ios-device:
+  ios-unsigned:
     needs: plan
-    if: needs.plan.outputs.ios == 'signed'
+    if: needs.plan.outputs.ios == 'unsigned'
     runs-on: macos-15
-    environment: release-signing
     timeout-minutes: 20
     env:
       TARGET: ios-device-arm64
@@ -134,11 +153,7 @@ jobs:
           NSH_PLATFORM: macos-arm64
           EXPECTED_ARCH: ARM64
         run: python3 scripts/release.py install
-      - name: Build and verify device IPA
-        env:
-          IOS_CERTIFICATE_P12_B64: ${{ secrets.IOS_CERTIFICATE_P12_B64 }}
-          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
-          IOS_PROVISIONING_PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_B64 }}
+      - name: Build and verify unsigned device IPA
         run: python3 scripts/release.py package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -146,11 +161,43 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
+  ios-device:
+    needs: plan
+    if: needs.plan.outputs.ios == 'signed'
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 20
+    env:
+      TARGET: ios-device-signed-arm64
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned NSH distribution and iOS runtime
+        env:
+          NSH_PLATFORM: macos-arm64
+          EXPECTED_ARCH: ARM64
+        run: python3 scripts/release.py install
+      - name: Build and verify Ad Hoc IPA
+        env:
+          IOS_CERTIFICATE_P12_B64: ${{ secrets.IOS_CERTIFICATE_P12_B64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_B64 }}
+        run: python3 scripts/release.py package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-ios-device-signed-arm64
+          path: release-assets/*
+          if-no-files-found: error
+
   verify-assets:
-    needs: [plan, package, android-signed, ios-device]
+    needs: [plan, package, android-debug, android-signed, ios-unsigned, ios-device]
     if: >-
       !cancelled() && needs.plan.result == 'success' && needs.package.result == 'success' &&
+      (needs.android-debug.result == 'success' || needs.android-debug.result == 'skipped') &&
       (needs.android-signed.result == 'success' || needs.android-signed.result == 'skipped') &&
+      (needs.ios-unsigned.result == 'success' || needs.ios-unsigned.result == 'skipped') &&
       (needs.ios-device.result == 'success' || needs.ios-device.result == 'skipped')
     runs-on: ubuntu-24.04
     steps:

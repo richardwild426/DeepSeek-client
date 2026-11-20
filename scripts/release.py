@@ -48,9 +48,10 @@ ASSETS = {
     "windows-x64": ("windows-x64.zip", "Windows x64 (portable, not Authenticode-signed)"),
     "linux-x64": ("linux-x64.tar.gz", "Linux x64 (Ubuntu 24.04 runtime baseline)"),
     "web": ("web-static.zip", "Static Web files (not deployed)"),
-    "android": ("android.apk", "Android ARM64/ARMv7 (maintainer-signed, sideload)"),
-    "android-test": ("android-test-only.apk", "Android ARM64/ARMv7 (throwaway test key and separate app ID)"),
-    "ios-device-arm64": ("ios-device-ad-hoc-arm64.ipa", "iOS ARM64 (Apple Ad Hoc, profile-listed devices only)"),
+    "android": ("android.apk", "Android ARM64 (maintainer release key, sideload)"),
+    "android-debug": ("android-debug.apk", "Android ARM64 (throwaway key, sideload; uninstall before a release-key build)"),
+    "ios-device-arm64": ("ios-device-arm64.ipa", "iOS ARM64 (unsigned; sideload and self-sign)"),
+    "ios-device-signed-arm64": ("ios-device-ad-hoc-arm64.ipa", "iOS ARM64 (Apple Ad Hoc, profile-listed devices only)"),
     "ios-simulator-arm64": ("ios-simulator-arm64.zip", "iOS Simulator on Apple silicon (not for physical devices)"),
 }
 OUT = Path("release-assets")
@@ -102,9 +103,11 @@ def plan():
     android, ios = enabled("ENABLE_ANDROID"), enabled("ENABLE_IOS")
     if tag:
         require(os.environ["GITHUB_REF"] == f"refs/tags/v{version}", f"Expected tag v{version} to match nsh.json.")
+    # Both mobile packages ship on every run: the Android APK is always installable
+    # (throwaway key unless a release key is configured) and the iOS IPA is always
+    # buildable (unsigned unless Apple signing material is configured).
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write(f"version={version}\nandroid={'signed' if tag and android else 'skip' if tag else 'test'}\n"
-                     f"ios={'signed' if tag and ios else 'skip'}\n")
+        output.write(f"version={version}\nandroid={'signed' if android else 'debug'}\nios={'signed' if ios else 'unsigned'}\n")
 
 
 def install():
@@ -158,7 +161,7 @@ def zip_verify(path, required):
                     f"Missing or empty ZIP entry: {member}")
 
 
-def apple_verify(app, app_id, arch, macho_platform, mac=False):
+def apple_verify(app, app_id, arch, macho_platform, mac=False, signed=True):
     contents = app / "Contents" if mac else app
     plist = plistlib.loads((contents / "Info.plist").read_bytes())
     require(plist["CFBundleIdentifier"] == app_id and plist["CFBundleShortVersionString"] == os.environ["VERSION"]
@@ -171,7 +174,8 @@ def apple_verify(app, app_id, arch, macho_platform, mac=False):
     legacy_macos = mac and re.search(r"^\s*cmd\s+LC_VERSION_MIN_MACOSX\s*$", build, re.M)
     require(legacy_macos or re.search(rf"^\s*platform\s+{macho_platform}\s*$", build, re.M),
             "Wrong Mach-O target platform.")
-    run("codesign", "--verify", "--strict", "--deep", app)
+    if signed:
+        run("codesign", "--verify", "--strict", "--deep", app)
 
 
 def mac_dmg(out, work, name, app_id, target, dest):
@@ -236,8 +240,74 @@ def secret_file(key, path):
         file.write(data)
 
 
+def slim_apk(apk, dest, tools, env):
+    """Repack the APK so the runtime .so compresses instead of sitting stored.
+
+    NSH writes extractNativeLibs=false, which forces lib/*.so to be stored uncompressed
+    (~48 MB). Flipping the manifest attribute to true lets the same bytes be deflated
+    (~21 MB) and costs nothing at launch: Android extracts them on install either way.
+    Any signature from the original APK is void afterwards, so the caller re-signs.
+    """
+    unpacked = apk.parent / "unpacked"
+    with zipfile.ZipFile(apk) as archive:
+        archive.extractall(unpacked)
+    manifest = unpacked / "AndroidManifest.xml"
+    data = bytearray(manifest.read_bytes())
+    # The string pool chunk starts at byte 8; its header size is the u16 at byte 10.
+    string_pool_header = struct.unpack_from("<H", data, 10)[0]
+    count = struct.unpack_from("<I", data, 16)[0]
+    flags = struct.unpack_from("<I", data, 16 + 8)[0]
+    strings_start = struct.unpack_from("<I", data, 16 + 12)[0]
+    offsets = [struct.unpack_from("<I", data, 8 + string_pool_header + index * 4)[0] for index in range(count)]
+    names = []
+    for offset in offsets:
+        position = 8 + strings_start + offset
+        if flags & 0x100:
+            length = data[position]
+            start = position + (2 if length & 0x80 else 1)
+            names.append(data[start:data.index(0, start)].decode("utf-8", "replace"))
+        else:
+            length = struct.unpack_from("<H", data, position)[0]
+            start = position + 2
+            if length & 0x8000:
+                start += 2
+                length = struct.unpack_from("<H", data, position + 2)[0]
+            names.append(data[start:start + length * 2].decode("utf-16-le", "replace"))
+    target = names.index("extractNativeLibs")
+    for offset in range(8, len(data) - 40, 4):
+        if struct.unpack_from("<HHI", data, offset)[0] != 0x0102:
+            continue
+        start, size, attributes = struct.unpack_from("<HHH", data, offset + 24)
+        base = offset + 16 + start
+        for index in range(attributes):
+            attribute = base + index * size
+            if attribute + 20 > len(data):
+                break
+            if struct.unpack_from("<I", data, attribute + 4)[0] == target:
+                # Both the raw value and the typed data must flip; changing one alone
+                # reports true while the runtime still behaves as false.
+                struct.pack_into("<I", data, attribute + 8, 0xFFFFFFFF)
+                struct.pack_into("<I", data, attribute + 16, 0xFFFFFFFF)
+                manifest.write_bytes(data)
+                break
+        else:
+            continue
+        break
+    else:
+        raise SystemExit("extractNativeLibs attribute not found in AndroidManifest.xml.")
+    with zipfile.ZipFile(dest, "w") as archive:
+        for path in sorted(unpacked.rglob("*")):
+            if not path.is_file():
+                continue
+            entry = path.relative_to(unpacked).as_posix()
+            # resources.arsc must stay stored and 4-byte aligned from Android 11 on.
+            stored = entry == "resources.arsc"
+            archive.write(path, entry, compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
+                          compresslevel=None if stored else 9)
+
+
 def android(out, work, name, app_id, mode, dest):
-    require(mode in ("test", "signed"), "Android must be test-only or maintainer-signed.")
+    require(mode in ("debug", "signed"), "Android must be debug-signed or maintainer-signed.")
     root = Path(os.environ["ANDROID_HOME"])
     sdk = work / "sdk"
     tools = sdk / "build-tools/35.0.1"
@@ -248,8 +318,9 @@ def android(out, work, name, app_id, mode, dest):
     verify_env = dict(os.environ, ANDROID_HOME=str(sdk), ANDROID_SDK_ROOT=str(sdk))
     verify_env.pop("ANDROID_KEYSTORE_B64", None)
     verify_env.pop("NSH_KEYSTORE_PASSWORD", None)
-    app_id += ".test" if mode == "test" else ""
-    args = ["--id", app_id, "--abi", "arm64-v8a,armeabi-v7a"]
+    # arm64 only: every Android phone that can run the app is 64-bit, and a second
+    # ABI doubles the unpacked runtime the APK carries.
+    args = ["--id", app_id, "--abi", "arm64-v8a"]
     apk = out / f"{name}.apk"
     test_key = work / "android-test.p12"
     run("keytool", "-genkeypair", "-storetype", "PKCS12", "-keystore", test_key, "-alias", "test",
@@ -257,8 +328,13 @@ def android(out, work, name, app_id, mode, dest):
         env=verify_env)
     nsh("android", out, *args, "--keystore", test_key, "--key-alias", "test",
         env=dict(verify_env, NSH_KEYSTORE_PASSWORD="test-only"))
-    if mode == "test":
-        shutil.copyfile(apk, dest)
+    slim_apk(apk, work / "slim.apk", tools, verify_env)
+    aligned = work / "aligned.apk"
+    run(tools / "zipalign", "-f", "-p", "4", work / "slim.apk", aligned, env=verify_env)
+    if mode == "debug":
+        run(tools / "apksigner", "sign", "--v4-signing-enabled", "false", "--ks", test_key, "--ks-key-alias", "test",
+            "--ks-pass", "env:KEY_PASSWORD", "--key-pass", "env:KEY_PASSWORD", "--out", dest, aligned,
+            env=dict(verify_env, KEY_PASSWORD="test-only"), private=True)
     else:
         key = work / "android.p12"
         alias = os.getenv("ANDROID_KEY_ALIAS", "")
@@ -270,18 +346,52 @@ def android(out, work, name, app_id, mode, dest):
         # NSH uses pass: arguments for its own signer. Re-sign the identical APK with
         # apksigner's env: support instead, without giving NSH our release credentials.
         run(tools / "apksigner", "sign", "--v4-signing-enabled", "false", "--ks", key, "--ks-key-alias", alias,
-            "--ks-pass", "env:KEY_PASSWORD", "--key-pass", "env:KEY_PASSWORD", "--out", dest, apk,
+            "--ks-pass", "env:KEY_PASSWORD", "--key-pass", "env:KEY_PASSWORD", "--out", dest, aligned,
             env=dict(verify_env, KEY_PASSWORD=password), private=True)
     run(tools / "zipalign", "-c", "4", dest, env=verify_env)
     certificates = run(tools / "apksigner", "verify", "--verbose", "--print-certs", dest,
                        env=verify_env, capture=True, private=True).decode()
+    require(re.search(r"^Verified using v2 scheme \(APK Signature Scheme v2\): true$", certificates, re.M)
+            is not None, "APK lacks a v2 signature.")
     if mode == "signed":
         signers = re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$", certificates, re.M)
         require([item.lower() for item in signers] == [expected], "APK signer does not match ANDROID_CERT_SHA256.")
     badging = run(tools / "aapt", "dump", "badging", dest, env=verify_env, capture=True).decode()
     require(f"package: name='{app_id}' versionCode='{config()['build']}' versionName='{os.environ['VERSION']}'" in badging,
             "Unexpected APK identity or version.")
-    zip_verify(dest, ("classes.dex", "assets/nsh/bundle.nshc", "lib/arm64-v8a/libnsh.so", "lib/armeabi-v7a/libnsh.so"))
+    zip_verify(dest, ("classes.dex", "assets/nsh/bundle.nshc", "lib/arm64-v8a/libnsh.so"))
+
+
+def ios_unsigned(out, work, name, app_id, dest):
+    """A device .app without Apple signing, wrapped as Payload/<ascii>.app for sideloading.
+
+    Sideloadly/AltStore-style tools re-sign it with the user's own certificate, so it
+    installs without a paid developer account. Kept ASCII-named because a Unicode name
+    inside the ZIP trips up some sideloading tools.
+    """
+    nsh("ios", out)
+    app = out / f"{name}.app"
+    payload = work / "Payload"
+    payload.mkdir()
+    run("ditto", "--norsrc", "--noextattr", app, payload / "Yantai.app")
+    archive = work / "unsigned.ipa"
+    # Built with zipfile rather than ditto so no AppleDouble (._*) or resource-fork
+    # entries land in the archive: sideloading tools reject or mis-handle those.
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as ipa:
+        for path in sorted(payload.rglob("*")):
+            entry = path.relative_to(work).as_posix()
+            if path.is_dir():
+                ipa.writestr(zipfile.ZipInfo(entry + "/"), b"")
+            elif not path.name.startswith("._"):
+                ipa.write(path, entry, compress_type=zipfile.ZIP_DEFLATED)
+    extracted = work / "unsigned"
+    with zipfile.ZipFile(archive) as ipa:
+        ipa.extractall(extracted)
+    apple_verify(extracted / "Payload/Yantai.app", app_id, "arm64", "IOS", signed=False)
+    require(not (extracted / "Payload/Yantai.app/_CodeSignature").exists()
+            and not (extracted / "Payload/Yantai.app/embedded.mobileprovision").exists(),
+            "Unsigned IPA unexpectedly carries signing material.")
+    shutil.copyfile(archive, dest)
 
 
 def ios_device(out, work, name, app_id, dest):
@@ -338,7 +448,9 @@ def package():
     name, app_id = app["name"], app["id"]
     target = os.environ["TARGET"]
     mode = os.getenv("ANDROID_MODE", "")
-    key = "android-test" if target == "android" and mode == "test" else target
+    key = target
+    if target == "android" and mode == "debug":
+        key = "android-debug"
     OUT.mkdir(exist_ok=True)
     final = OUT / asset_name(key)
     require(not final.exists(), f"Refusing to overwrite {final.name}.")
@@ -374,6 +486,8 @@ def package():
             run("ditto", "-x", "-k", dest, extracted)
             apple_verify(extracted / app_path.name, app_id, "arm64", "IOSSIMULATOR")
         elif target == "ios-device-arm64":
+            ios_unsigned(out, work, name, app_id, dest)
+        elif target == "ios-device-signed-arm64":
             ios_device(out, work, name, app_id, dest)
         else:
             raise SystemExit(f"Unknown package target: {target}")
@@ -384,15 +498,13 @@ def package():
 
 def collect():
     android_mode, ios_mode = os.environ["ANDROID_MODE"], os.environ["IOS_MODE"]
-    require(android_mode in ("skip", "test", "signed") and ios_mode in ("skip", "signed"), "Invalid mobile package plan.")
-    expected = ["macos-arm64", "macos-x64", "windows-x64", "linux-x64", "web", "ios-simulator-arm64"]
-    if android_mode != "skip":
-        expected.append("android-test" if android_mode == "test" else "android")
-    if ios_mode == "signed":
-        expected.append("ios-device-arm64")
+    require(android_mode in ("debug", "signed") and ios_mode in ("unsigned", "signed"),
+            "Invalid mobile package plan.")
+    android = "android" if android_mode == "signed" else "android-debug"
+    ios = "ios-device-signed-arm64" if ios_mode == "signed" else "ios-device-arm64"
+    expected = ["macos-arm64", "macos-x64", "windows-x64", "linux-x64", "web", "ios-simulator-arm64", android, ios]
     incoming = Path("downloaded")
-    files = {incoming / f"package-{'android' if target == 'android-test' else target}" / asset_name(target): target
-             for target in expected}
+    files = {incoming / f"package-{target}" / asset_name(target): target for target in expected}
     require({path for path in incoming.rglob("*") if not path.is_dir()} == set(files), "Unexpected or missing release assets.")
     OUT.mkdir()
     lines = ["## Verified packages", "", "| File | Target |", "| --- | --- |"]
@@ -401,12 +513,14 @@ def collect():
         shutil.copyfile(path, OUT / path.name)
         lines.append(f"| `{path.name}` | {ASSETS[target][1]} |")
     lines.append("")
-    if android_mode == "skip":
-        lines.append("- Android APK omitted: `RELEASE_ANDROID_SIGNED` is disabled.")
-    if ios_mode == "skip":
-        lines.append("- Physical iOS device IPA omitted: Ad Hoc signing is disabled for this run.")
-    if android_mode == "test":
-        lines.append("- Dispatch dry-run only: no GitHub Release or Cloudflare deployment; no production signing secrets used.")
+    if android_mode == "debug":
+        lines.append("- Android APK uses a throwaway key, not the maintainer release key: "
+                     "uninstall it before installing a release-key build, and never treat it as upgradeable.")
+    if ios_mode == "unsigned":
+        lines.append("- iOS IPA is unsigned: re-sign it with Sideloadly, AltStore or Xcode before installing. "
+                     "A free Apple ID signature expires after 7 days.")
+    if os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch":
+        lines.append("- Dispatch run only: no GitHub Release and no Cloudflare deployment.")
     notes = "\n".join(lines) + "\n"
     (OUT / "RELEASE-ASSETS.md").write_text(notes, encoding="utf-8")
     manifest = "".join(f"{digest(file)}  {file.name}\n" for file in sorted(OUT.iterdir()))

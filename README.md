@@ -19,18 +19,20 @@
 | macOS Apple silicon / Intel | `macos-arm64.dmg` / `macos-x64.dmg` | 打开 DMG，把「砚台」拖到 Applications。应用仅 ad hoc 签名，未使用 Developer ID、公证或盖章；Gatekeeper 可能拦截。此包不等同于已公证的公开分发包。不要全局关闭 Gatekeeper。 |
 | Windows x64 | `windows-x64.zip` | 完整解压后运行归档内的 `.exe`，保留同目录的 `nsh`。便携版，不是安装器；未做 Authenticode 签名，SmartScreen 可能提示。 |
 | Linux x64 | `linux-x64.tar.gz` | 解包后运行目录内的 `./App`。以 Ubuntu 24.04 为依赖基线，需 GTK 4.14+、WebKitGTK 6 和 GStreamer，例如 `sudo apt install libgtk-4-1 libwebkitgtk-6.0-4 libgstreamer-plugins-base1.0-0`。 |
-| Android ARM64 / ARMv7 | `android.apk`（可选） | 仅在维护者启用并配置长期签名后提供。旁加载或 `adb install`。升级要求相同应用 ID、相同签名和递增的 `nsh.json` `build`（Android `versionCode`）；不是 Play 商店产物。 |
-| iOS ARM64 真机 | `ios-device-ad-hoc-arm64.ipa`（可选） | 仅在维护者启用并配置有效 Apple Distribution 证书及匹配的 Ad Hoc 描述文件后提供，仅限描述文件登记的设备，受证书和描述文件有效期限制。**不是** App Store、TestFlight、企业分发或任意设备可装的 IPA。 |
+| Android ARM64 | `android-debug.apk` | 每次发布都提供，用一次性密钥签名，可直接旁加载或 `adb install`，包内运行时已压缩（约 20 MB）。因为不是长期密钥，它不能覆盖升级另一个签名的安装，也不能作为 Play 商店产物；换用 `android.apk` 前先卸载。 |
+| Android ARM64（长期签名） | `android.apk`（可选） | 仅在维护者启用并配置长期签名后提供，替代 `android-debug.apk`。升级要求相同应用 ID、相同签名和递增的 `nsh.json` `build`（Android `versionCode`）。 |
+| iOS ARM64 真机 | `ios-device-arm64.ipa` | 每次发布都提供，**未签名**。用 Sideloadly、AltStore 或 Xcode 以你自己的 Apple ID 重签后安装；免费账号的签名 7 天失效，重签即可。不是 App Store、TestFlight 或企业分发产物。 |
+| iOS ARM64 真机（Ad Hoc） | `ios-device-ad-hoc-arm64.ipa`（可选） | 仅在维护者启用并配置有效 Apple Distribution 证书及匹配的 Ad Hoc 描述文件后提供，仅限描述文件登记的设备，受证书和描述文件有效期限制。**不是** App Store、TestFlight 或任意设备可装的 IPA。 |
 | iOS 模拟器（Apple silicon） | `ios-simulator-arm64.zip` | 解压后用 Xcode 的 `xcrun simctl install booted 砚台.app` 安装到已启动的模拟器；不能装到真机。工作流仅验证包，不启动模拟器。 |
 | Web | `web-static.zip` | 解压后用静态服务器提供 `index.html` 及同目录文件；浏览器跨域限制仍适用。工作流不会部署 Cloudflare。 |
 
 ### 发布维护
 
-- `.github/workflows/release.yml` 与现有 CI 独立。先在 Actions 的 **Package GitHub Release** 手动运行 (`workflow_dispatch`)，实际打包并上传 `verified-release-assets`，不发 Release、不使用生产签名。Android 测试包由一次性证书签名，应用 ID 为 `app.yantai.deepseek.test`，不可用于长期升级；iOS 真机不参与 dry-run。`RELEASE-ASSETS.md` 明示缺少的移动端资产。
+- `.github/workflows/release.yml` 与现有 CI 独立。先在 Actions 的 **Package GitHub Release** 手动运行 (`workflow_dispatch`)，实际打包并上传 `verified-release-assets`，不发 Release、不使用生产签名。每次运行都会产出 Android 和 iOS 真机包：Android 用一次性密钥签名，iOS 输出未签名 IPA。`RELEASE-ASSETS.md` 记录本次用的是哪种签名。
 - 维护者先更新 `nsh.json` 的 `version` 和递增的 `build`，再对验收过的提交创建并推送匹配的 `vMAJOR.MINOR.PATCH` 标签（如 `v1.0.0`）。标签必须已存在且严格匹配版本。流程精确核对各平台资产清单并生成 `SHA256SUMS`，然后在 GitHub 创建草稿、上传资产，成功后发布。配置了签名却缺少或给错凭据会失败，不回退到测试包；已有 Release 不被覆盖。失败留下草稿时，维护者先在 GitHub 检查草稿、资产和标签，再决定手动处理或移除草稿后重跑。
 - 建议用 GitHub ruleset 限制谁能创建或修改 `v*` tag，并把生产签名只放在限制 `v*` tag 的 `release-signing` Environment 中。NSH 固定为 `0.5.1 (224d9a7)`；下载安装使用 [上游 v0.5.1 发行资产](https://github.com/longbridge/nsh/releases/tag/v0.5.1) 和代码内固定 SHA-256，不运行远端安装脚本。该版本官方 `install.sh` 支持 Linux/macOS，Windows 用 `install.ps1`；发行版包含各自的原生 runner。按 [GitHub runner images](https://github.com/actions/runner-images#available-images) 使用 `macos-15` (ARM64)、`macos-15-intel` (x64)、`windows-2022` (x64)、`ubuntu-24.04` (x64)。固定工具输入并校验输出，但不承诺不同 runner 镜像、签名时间和磁盘映像的逐字节一致性。
 
-启用可选签名时设置以下 **Actions repository variables** 和 **`release-signing` Environment secrets**。变量未设或为 `false` 时不发布相应真机包：
+启用可选签名时设置以下 **Actions repository variables** 和 **`release-signing` Environment secrets**。变量未设或为 `false` 时，改用上面的 `android-debug.apk` 和未签名 `ios-device-arm64.ipa`：
 
 | 类型 | 名称 | 值 |
 | --- | --- | --- |
