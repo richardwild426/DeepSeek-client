@@ -200,6 +200,27 @@ jobs:
     steps:
       - run: echo 'probe-d ran without needs'
 
+  probe-e:
+    needs: plan
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo 'probe-e ran (needs plan)'
+
+  probe-f:
+    needs: [verify-assets]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo 'probe-f ran (needs list)'
+
+  probe-g:
+    needs: verify-assets
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo 'probe-g ran (always-ish)'
+
   publish:
     needs: verify-assets
     if: github.event_name == 'push' && github.ref_type == 'tag'
