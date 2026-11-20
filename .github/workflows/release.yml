@@ -65,7 +65,10 @@ jobs:
         run: python scripts/release.py install
       - name: Prepare Android Build Tools
         if: matrix.target == 'android' && needs.plan.outputs.android == 'test'
-        run: sdkmanager 'build-tools;35.0.1' 'platforms;android-35'
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          log-accepted-android-sdk-licenses: false
+          packages: 'build-tools;35.0.1 platforms;android-35'
       - name: Package and verify (no signing secrets)
         if: matrix.target != 'android' || needs.plan.outputs.android == 'test'
         run: python scripts/release.py package
@@ -96,7 +99,10 @@ jobs:
           EXPECTED_ARCH: X64
         run: python3 scripts/release.py install
       - name: Prepare Android Build Tools
-        run: sdkmanager 'build-tools;35.0.1' 'platforms;android-35'
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          log-accepted-android-sdk-licenses: false
+          packages: 'build-tools;35.0.1 platforms;android-35'
       - name: Package and verify signed Android APK
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
