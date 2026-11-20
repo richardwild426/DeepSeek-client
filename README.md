@@ -12,7 +12,7 @@
 
 ## 从 GitHub Releases 下载
 
-在仓库的 **Releases** 页面选择与你的系统匹配的 `yantai-v<版本>-…` 文件。先下载同一版本的 `SHA256SUMS`，在下载目录运行 `sha256sum --ignore-missing --check SHA256SUMS`（macOS 可用 `shasum -a 256 --ignore-missing -c SHA256SUMS`）；确认所选文件显示 `OK`。Windows 可用 `Get-FileHash -Algorithm SHA256 <文件>`，和清单中同名文件的摘要比较。
+在仓库的 **Releases** 页面（[最新版本](https://github.com/richardwild426/DeepSeek-client/releases/latest)）选择与你的系统匹配的 `yantai-v<版本>-…` 文件。先下载同一版本的 `SHA256SUMS`，在下载目录运行 `sha256sum --ignore-missing --check SHA256SUMS`（macOS 可用 `shasum -a 256 --ignore-missing -c SHA256SUMS`）；确认所选文件显示 `OK`。Windows 可用 `Get-FileHash -Algorithm SHA256 <文件>`，和清单中同名文件的摘要比较。
 
 | 平台 | 文件后缀 | 安装或使用 |
 | --- | --- | --- |
