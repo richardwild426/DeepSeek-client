@@ -194,6 +194,12 @@ jobs:
     steps:
       - run: echo 'probe-c ran'
 
+  probe-d:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo 'probe-d ran without needs'
+
   publish:
     needs: verify-assets
     if: github.event_name == 'push' && github.ref_type == 'tag'
