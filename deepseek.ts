@@ -13,6 +13,7 @@ export type Message = {
   attachments?: Attachment[];
   reasoning_content?: string;
   thinkingText?: string;
+  thinkingSeconds?: number;
   annotations?: Citation[];
   server_tool_calls?: unknown[];
 };

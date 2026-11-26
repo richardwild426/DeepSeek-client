@@ -40,6 +40,7 @@ const paths = {
   stop: "M6 6h12v12H6Z",
   upload: "M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4M12 15V4m-5 5 5-5 5 5",
   copy: "M8 8h12v13H8ZM4 16V3h12",
+  check: "m5 12 4 4L19 6",
 };
 
 type IconName = keyof typeof paths;

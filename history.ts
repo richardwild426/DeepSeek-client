@@ -73,7 +73,7 @@ function readMessages(value: unknown): Message[] {
     if (!(message?.role === "user" || message?.role === "assistant") || typeof message.content !== "string") {
       throw new Error("无效的消息。");
     }
-    const { role, content, attachments, reasoning_content, thinkingText, annotations, server_tool_calls } = message;
+    const { role, content, attachments, reasoning_content, thinkingText, thinkingSeconds, annotations, server_tool_calls } = message;
     const files = Array.isArray(attachments) ? attachments.flatMap((file: unknown) => {
       const attachment = record(file);
       return typeof attachment?.id === "string" && typeof attachment.name === "string"
@@ -85,6 +85,8 @@ function readMessages(value: unknown): Message[] {
       ...(files?.length ? { attachments: files } : {}),
       ...(typeof reasoning_content === "string" ? { reasoning_content } : {}),
       ...(typeof thinkingText === "string" ? { thinkingText } : {}),
+      ...(role === "assistant" && typeof thinkingSeconds === "number" && Number.isSafeInteger(thinkingSeconds) && thinkingSeconds >= 0
+        ? { thinkingSeconds } : {}),
       ...(citations?.length ? { annotations: citations } : {}),
       ...(Array.isArray(server_tool_calls) ? { server_tool_calls: server_tool_calls.filter((call) => !isDataUrl(call)).map((call) => cleanToolState(call)) } : {}),
     };

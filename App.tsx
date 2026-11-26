@@ -1,6 +1,6 @@
 import type { JSX } from "nsh/jsx-runtime";
-import { Clipboard, colorScheme, List, mount, openUrl, Picker, Scroll, setColorScheme, signal, Speech, Storage, Text, View, windowSize, type SpeechSession } from "nsh";
-import { Dialog, Input } from "nsh/base";
+import { batch, Clipboard, colorScheme, List, mount, openUrl, Picker, platform, Scroll, setColorScheme, signal, Speech, Storage, Text, View, windowSize, type SpeechSession } from "nsh";
+import { Dialog, Input, TextView } from "nsh/base";
 import { complete, loadBalance, loadModels, models, sourceUrl, type Attachment, type Message, type Model } from "./deepseek";
 
 import { conversationTitle, createHistoryWriter, emptyHistory, exportHistory, historyKey, legacyKey, mergeHistory, parseHistory, restoreHistory, type History } from "./history";
@@ -26,6 +26,8 @@ function App() {
   const search = signal(false);
   const readLinks = signal(false);
   const partialThinking = signal("");
+  const expectsThinking = signal(false);
+  const thinkingSeconds = signal<number | undefined>(undefined);
   const expandedThinking = signal<Record<number, boolean>>({});
   let accountRequest: AbortController | undefined;
 
@@ -37,6 +39,9 @@ function App() {
   const messages = signal<Message[]>([]);
   const partial = signal("");
   const activeQuestion = signal("");
+  const activeContext = signal<Message[]>([]);
+  const stoppedReply = signal<{ context: Message[]; reply: Message } | null>(null);
+  let stoppedByUser = false;
   const status = signal("");
   const busy = signal(false);
   const settings = signal(false);
@@ -304,6 +309,7 @@ function App() {
       history.set(cleared);
       messages.set([]);
       expandedThinking.set({});
+      stoppedReply.set(null);
       exportPreview.set("");
       confirmingDelete.set(false);
       status.set("");
@@ -356,6 +362,7 @@ function App() {
     question.set("");
     files.set([]);
     expandedThinking.set({});
+    stoppedReply.set(null);
     status.set("");
     drawer.set(false);
   }
@@ -372,10 +379,14 @@ function App() {
     }
   }
 
-  async function send(text = question()) {
+  async function send(text = question(), previous?: Message[]) {
     if (controller || vaultBusy() || picking() || recording() || !historyReady() || importOpen() || deleting()) return;
     const content = text.trim();
     if (!content) return;
+    if (web && !previous && stoppedReply()) {
+      status.set("请先重新生成，或放弃已停止的这轮回答。新问题已保留。");
+      return;
+    }
     const token = key().trim();
     const selectedModel = model();
     const options = { thinking: thinking(), search: search(), readLinks: readLinks() };
@@ -388,22 +399,37 @@ function App() {
       status.set("搜索或读链接需要 DeepSeek Flash。");
       return;
     }
-    const pending = files();
-    if ((pending.length || messages().some((message) => message.attachments?.length)) && selectedModel !== models[0]) {
+    const pending = previous ? [] : files();
+    const context = previous ?? [...messages(), { role: "user", content }];
+    if ((pending.length || context.some((message) => message.attachments?.length)) && selectedModel !== models[0]) {
       status.set("带附件的对话需要 DeepSeek Flash。");
       return;
     }
-    const turn: Message = { role: "user", content };
-    const context = [...messages(), turn];
+    const turn = context[context.length - 1];
     const request = new AbortController();
     controller = request;
+    stoppedByUser = false;
+    const previousStop = stoppedReply();
     const timeout = setTimeout(() => request.abort(), pending.length ? 600_000 : 120_000);
     let answer = "";
-    busy.set(true);
-    activeQuestion.set(content);
-    question.set("");
-    partial.set("");
-    status.set("");
+    let thinkingStartedAt: number | undefined;
+    batch(() => {
+      expectsThinking.set(options.thinking);
+      thinkingSeconds.set(undefined);
+      if (web) {
+        const index = context.length;
+        expandedThinking.update((value) => ({ ...value, [index]: true }));
+      }
+      activeQuestion.set(content);
+      if (web) {
+        activeContext.set(context);
+        stoppedReply.set(null);
+      }
+      if (!previous) question.set("");
+      partial.set("");
+      status.set("");
+      busy.set(true);
+    });
     try {
       if (pending.length) {
         const uploaded: Attachment[] = [];
@@ -420,27 +446,58 @@ function App() {
       if (request.signal.aborted) throw new Error("请求已停止。");
       const response = await complete(token, selectedModel, context, request.signal, (delta) => {
         if (request.signal.aborted) return;
-        answer += delta;
-        partial.set(answer);
+        batch(() => {
+          if (!answer && thinkingStartedAt !== undefined) {
+            thinkingSeconds.set(Math.max(1, Math.round((Date.now() - thinkingStartedAt) / 1000)));
+          }
+          answer += delta;
+          partial.set(answer);
+        });
       }, options, (text) => {
-        if (!request.signal.aborted) partialThinking.set(text);
+        if (request.signal.aborted) return;
+        if (web && text && thinkingStartedAt === undefined) thinkingStartedAt = Date.now();
+        partialThinking.set(text);
       });
       if (request.signal.aborted || !response.content.trim()) throw new Error("没有收到完整回答。");
-      storeConversation([...context, response]);
-      files.set([]);
+      if (response.thinkingText) response.thinkingSeconds = thinkingSeconds();
+      batch(() => {
+        storeConversation([...context, response]);
+        if (!previous) files.set([]);
+        busy.set(false);
+      });
     } catch (error) {
-      if (!question()) question.set(content);
-      status.set(request.signal.aborted ? "请求已停止或超时，原问题已保留。" :
-        error instanceof Error ? error.message : "请求失败，请重试。");
+      if (web && stoppedByUser && (partialThinking() || partial())) {
+        stoppedReply.set({ context, reply: { role: "assistant", content: partial(), thinkingText: partialThinking() } });
+        if (!previous) files.set([]);
+      } else {
+        if (previousStop) stoppedReply.set(previousStop);
+        if (!previous && !question()) question.set(content);
+        status.set(request.signal.aborted ? "请求已停止或超时，原问题已保留。" :
+          error instanceof Error ? error.message : "请求失败，请重试。");
+      }
     } finally {
       clearTimeout(timeout);
       controller = undefined;
-      activeQuestion.set("");
-      partial.set("");
-      partialThinking.set("");
-      phase.set("");
-      busy.set(false);
+      batch(() => {
+        busy.set(false);
+        activeContext.set([]);
+        activeQuestion.set("");
+        partial.set("");
+        partialThinking.set("");
+        phase.set("");
+      });
     }
+  }
+
+  function stopGeneration() {
+    stoppedByUser = true;
+    controller?.abort();
+  }
+
+  function regenerate() {
+    const context = stoppedReply()?.context ?? messages().slice(0, -1);
+    const turn = context[context.length - 1];
+    if (turn?.role === "user") void send(turn.content, context);
   }
 
   function reset() {
@@ -449,15 +506,23 @@ function App() {
     drawer.set(false);
     messages.set([]);
     expandedThinking.set({});
+    stoppedReply.set(null);
     question.set("");
     files.set([]);
     status.set("");
   }
 
-  const shown = () => busy()
-    ? [...messages(), { role: "user", content: activeQuestion() } as Message,
-      { role: "assistant", content: partial() || phase() || "正在等待回答…", thinkingText: partialThinking() } as Message]
-    : messages();
+  const web = platform.os === "web";
+  // Keep the live list cell bound while its Markdown grows.
+  const liveReply: Message = { role: "assistant", content: "" };
+  const shown = (): Message[] => {
+    if (busy()) {
+      return web ? [...activeContext(), liveReply] : [...messages(), { role: "user", content: activeQuestion() },
+        { role: "assistant", content: partial() || phase() || "正在等待回答…", thinkingText: partialThinking() }];
+    }
+    const stopped = stoppedReply();
+    return stopped ? [...stopped.context, stopped.reply] : messages();
+  };
 
   function Composer() {
     return (
@@ -499,7 +564,7 @@ function App() {
               </> : null}
               <View style={{ marginLeft: !busy() && !importOpen() && windowSize().width >= 360 ? (narrow() ? 8 : 6) : 0 }}>
                 {busy() ? <IconButton testID="stop" label="停止" name="stop" fill={colors().accent} color={colors().onAccent}
-                  action={() => controller?.abort()} /> : (
+                  action={stopGeneration} /> : (
                   <IconButton testID="send" label="发送" name="send" iconSize={19}
                     color={question().trim() ? colors().onAccent : colors().onDisabledAccent}
                     fill={question().trim() ? colors().accent : colors().disabledAccent}
@@ -514,6 +579,93 @@ function App() {
         </View>
       </View>
     );
+  }
+
+  function AnswerMarkdown(props: { text: string; streaming: boolean; reasoning?: boolean }) {
+    const tone = () => props.reasoning && colorScheme() === "light" ? "#61666b" :
+      props.reasoning ? colors().muted : colors().ink;
+    return <TextView markdown={props.text} selectable options={{ streaming: props.streaming, html: false }}
+      codeBlockActions={[{ id: "copy", label: "复制" }]}
+      onLinkPress={({ url }) => { const href = sourceUrl(url); if (href) void openUrl(href).catch(() => {}); }}
+      renderImage={({ alt }) => <Text style={{ color: tone() }}>{alt || "[图片]"}</Text>}
+      styles={{
+        root: { color: tone(), fontSize: props.reasoning ? 14 : 16, lineHeight: props.reasoning ? 24 : 28 },
+        heading: { fontWeight: 700 },
+        heading1: { fontSize: 24, lineHeight: 34 },
+        heading2: { fontSize: 22, lineHeight: 32 },
+        heading3: { fontSize: 20, lineHeight: 30 },
+        tableCell: { color: tone(), fontSize: 15, lineHeight: 25 },
+        tableHeaderCell: { color: tone(), fontWeight: 500 },
+        code: { fontSize: 14, lineHeight: 22, backgroundColor: colors().inset },
+        codeBlock: { backgroundColor: colors().rail, borderColor: colors().line },
+        codeBlockCode: { fontSize: 13, lineHeight: 22 },
+        link: { color: colors().accent },
+        blockquote: { borderColor: colors().selectedLine },
+      }} />;
+  }
+
+  function WebAnswer(props: { message: Message; index: number }) {
+    const live = () => props.message === liveReply;
+    const content = () => live() ? partial() : props.message.content;
+    const thought = () => live() ? partialThinking() : props.message.thinkingText;
+    const open = () => expandedThinking()[props.index] ?? false;
+    const reasoning = () => Boolean(thought());
+    const stopped = () => stoppedReply()?.reply === props.message;
+    const canRegenerate = () => !busy() && (stopped() || (!stoppedReply() && props.index === messages().length - 1));
+    const waiting = () => live() && !content();
+    const thinkingNow = () => waiting() && (expectsThinking() || reasoning()) && !phase();
+    const label = () => {
+      if (stopped()) return "已停止";
+      if (thinkingNow()) return "正在思考";
+      const seconds = live() ? thinkingSeconds() : props.message.thinkingSeconds;
+      return seconds === undefined ? "已思考" : `已思考（用时 ${seconds} 秒）`;
+    };
+    const copied = signal(false);
+    async function copyAnswer() {
+      try {
+        await Clipboard.writeText(props.message.content);
+        copied.set(true);
+        setTimeout(() => copied.set(false), 1500);
+      } catch {
+        status.set("无法复制回答。");
+      }
+    }
+    return <>
+      {thinkingNow() || reasoning() || stopped() ? <View class="gap-2 pb-1">
+        <View testID={`thought-${props.index}`} role={reasoning() ? "button" : undefined}
+          accessibilityState={reasoning() ? { expanded: open() } : undefined}
+          onPress={reasoning() ? () => expandedThinking.update((value) => ({ ...value, [props.index]: !open() })) : undefined}
+          class="flex-row items-center gap-1.5 self-start py-1">
+          {stopped() ? null : <Icon name="thinking" size={16} color={colors().muted} />}
+          <Text class="text-sm leading-5" style={{ color: colors().muted }}>{label()}</Text>
+          {reasoning() ? <View style={{ transform: open() ? "rotate(180deg)" : undefined }}>
+            <Icon name="chevron" size={14} color={colors().muted} />
+          </View> : null}
+        </View>
+        {reasoning() && open() ? <View testID={`reasoning-${props.index}`} class="border-l-2 pl-3"
+          style={{ borderColor: colors().line }}>
+          <AnswerMarkdown text={thought() ?? ""} streaming={thinkingNow()} reasoning />
+        </View> : null}
+      </View> : null}
+      {content() ? <View testID={`answer-${props.index}`} class="min-w-0">
+        <AnswerMarkdown text={content()} streaming={live()} />
+      </View> : waiting() && !thinkingNow() ? <Text class="text-sm leading-6" style={{ color: colors().muted }}>
+        {phase() || "正在等待回答…"}
+      </Text> : null}
+      {!live() && (content() || canRegenerate()) ? <View class="flex-row items-center gap-2 self-start">
+        {content() ? <IconButton testID={`copy-answer-${props.index}`} label={copied() ? "已复制" : "复制回答"} name={copied() ? "check" : "copy"}
+          size={28} color={colors().muted} action={() => void copyAnswer()} /> : null}
+        {canRegenerate() ? <View testID={`regenerate-${props.index}`} role="button" onPress={regenerate} class="py-1">
+          <Text class="text-sm" style={{ color: colors().muted }}>重新生成</Text>
+        </View> : null}
+        {stopped() ? <View testID={`discard-stopped-${props.index}`} role="button" class="py-1" onPress={() => {
+          stoppedReply.set(null);
+          status.set("");
+        }}>
+          <Text class="text-sm" style={{ color: colors().muted }}>放弃这轮</Text>
+        </View> : null}
+      </View> : null}
+    </>;
   }
 
   function Bubble(props: { message: Message; index: number }) {
@@ -534,6 +686,7 @@ function App() {
     }
     return (
       <View class="gap-2 pb-6">
+        {web ? <WebAnswer message={props.message} index={props.index} /> : <>
         {m.thinkingText ? <View class="gap-1">
           <View testID={`thought-${props.index}`} role="button"
             onPress={() => expandedThinking.update((value) => ({ ...value, [props.index]: !value[props.index] }))}
@@ -543,6 +696,7 @@ function App() {
           {expandedThinking()[props.index] ? <View selectable><Text class="text-sm leading-[22px]" style={{ color: colors().muted }}>{m.thinkingText}</Text></View> : null}
         </View> : null}
         <View selectable><Text class="text-base leading-7" style={{ color: colors().ink }}>{m.content}</Text></View>
+        </>}
         {m.annotations?.length ? <View class="flex-row flex-wrap gap-2">
           {m.annotations.map((annotation, i) => {
             const citation = annotation?.type === "url_citation" ? annotation.url_citation : undefined;
@@ -791,7 +945,7 @@ function App() {
     </Dialog>;
   }
 
-  const empty = () => !messages().length && !busy();
+  const empty = () => !messages().length && !busy() && !stoppedReply();
   return (
     <View class="flex-1 flex-row pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
       style={{ backgroundColor: colors().canvas }}>

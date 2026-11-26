@@ -14,6 +14,63 @@ const conversation = {
   ],
 };
 const backup = { version: 2, active: conversation.id, conversations: [conversation] };
+const fakeKey = 'fake-browser-fixture-key';
+const question = '合成样本：测试 Markdown';
+const answerChunks = [
+  '## 结果\n\n这是 **加粗** 和 `代码`。\n\n',
+  '1. 第一项\n2. 第二项\n\n> 引用\n\n',
+  '| 名称 | 值 |\n| --- | --- |\n| A | 1 |\n\n```js\nconst a = 1;\n```',
+];
+
+function installCompletionFixture(token) {
+  if (window !== window.top) return;
+  const patched = new WeakSet();
+  window.completionRequests = [];
+
+  function install(target) {
+    if (patched.has(target)) return;
+    patched.add(target);
+    const fetch = target.fetch.bind(target);
+    target.fetch = async (input, options) => {
+      const url = new URL(input?.url ?? input, window.location.href);
+      if (url.origin !== 'https://api.deepseek.com') return fetch(input, options);
+      const request = new target.Request(input, options);
+      if (url.pathname !== '/chat/completions' || request.method !== 'POST' ||
+          request.headers.get('authorization') !== `Bearer ${token}`) {
+        throw new Error('Unexpected request to the DeepSeek fixture');
+      }
+      window.completionRequests.push(await request.json());
+      const encoder = new target.TextEncoder();
+      return new target.Response(new target.ReadableStream({
+        start(controller) {
+          window.completionAborted = false;
+          request.signal.addEventListener('abort', () => {
+            window.completionAborted = true;
+            controller.error(new target.DOMException('Aborted', 'AbortError'));
+          }, { once: true });
+          window.emitCompletion = (delta) => {
+            const data = delta === null ? '[DONE]' : JSON.stringify({ choices: [{ delta }] });
+            controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+            if (delta === null) controller.close();
+          };
+        },
+      }), { headers: { 'Content-Type': 'text/event-stream' } });
+    };
+  }
+
+  install(window);
+  // NSH runs the packaged application in an about:blank iframe. Install the
+  // fixture before its runtime captures that realm's fetch implementation.
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+  Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+    ...descriptor,
+    get() {
+      const child = descriptor.get.call(this);
+      if (child) install(child);
+      return child;
+    },
+  });
+}
 
 async function smoke(context, viewport, colorScheme) {
   const externalRequests = [];
@@ -24,6 +81,7 @@ async function smoke(context, viewport, colorScheme) {
     return route.abort();
   });
 
+  await context.addInitScript(installCompletionFixture, fakeKey);
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const pageErrors = [];
@@ -67,7 +125,7 @@ async function smoke(context, viewport, colorScheme) {
   await keyField.waitFor({ state: 'hidden' });
   await id('theme-system').waitFor();
   await id('settings-tab-data').click();
-  await keyField.fill('fake-browser-fixture-key');
+  await keyField.fill(fakeKey);
   await visible('密钥仅保留在当前会话内存中。');
   await id('close-settings').click();
   await id('thinking').click();
@@ -139,6 +197,95 @@ async function smoke(context, viewport, colorScheme) {
   await id('new').click();
   await id('welcome').waitFor();
   assert.equal(await id('history-panel').isVisible(), !narrow);
+
+  if (narrow) await id('menu').click();
+  await id('settings').click();
+  await id('settings-tab-data').click();
+  await id('key').locator('input').fill(fakeKey);
+  await id('close-settings').click();
+  if (await id('thinking').getAttribute('aria-pressed') !== 'true') await id('thinking').click();
+  if (await id('read-links').getAttribute('aria-pressed') === 'true') await id('read-links').click();
+  await id('question').locator('textarea').fill(question);
+  await id('send').click();
+  await page.waitForFunction(() => typeof window.emitCompletion === 'function');
+  const emit = (delta) => page.evaluate((data) => window.emitCompletion(data), delta);
+  const thought = id('thought-1');
+  const reasoning = id('reasoning-1');
+  const answer = id('answer-1');
+  const copy = id('copy-answer-1');
+  await visible('正在思考');
+  assert.equal(await copy.isVisible(), false);
+  await emit({ reasoning_content: '先检查 **推理**。\n\n- 第一条' });
+  await reasoning.getByText('推理', { exact: true }).waitFor();
+  assert.equal(await thought.getAttribute('aria-expanded'), 'true');
+  await thought.click();
+  await reasoning.waitFor({ state: 'hidden' });
+  await emit({ reasoning_content: '\n- 第二条' });
+  await emit({ content: answerChunks[0] });
+  await answer.getByRole('heading', { level: 2, name: '结果' }).waitFor();
+  await thought.getByText(/已思考（用时 \d+ 秒）/).waitFor();
+  assert.notEqual(await thought.getAttribute('aria-expanded'), 'true');
+  await thought.press('Enter');
+  await reasoning.getByText('第二条', { exact: true }).waitFor();
+  assert.equal(await copy.isVisible(), false);
+  for (const content of answerChunks.slice(1)) await emit({ content });
+  await answer.getByText('值', { exact: true }).waitFor();
+  await emit(null);
+  await copy.waitFor();
+  assert.equal(await thought.getAttribute('aria-expanded'), 'true');
+  assert.equal(await answer.getByRole('heading', { level: 2, name: '结果' }).count(), 1);
+  for (const text of ['加粗', '代码', '第一项', '第二项', '引用', '名称', '值']) {
+    await answer.getByText(text, { exact: true }).waitFor();
+  }
+  assert.match(await answer.textContent(), /const a = 1;/);
+  await answer.getByRole('button', { name: '复制', exact: true }).click();
+  await page.waitForFunction(() => window.exportedHistory?.trim() === 'const a = 1;');
+  await copy.click();
+  await copy.and(page.getByRole('button', { name: '已复制', exact: true })).waitFor();
+  assert.equal(await page.evaluate(() => window.exportedHistory), answerChunks.join(''));
+  const [request] = await page.evaluate(() => window.completionRequests);
+  assert.deepEqual(request.messages, [{ role: 'user', content: question }]);
+  assert.deepEqual(request.thinking, { type: 'enabled' });
+
+  const regenerate = id('regenerate-1');
+  await regenerate.click();
+  await page.waitForFunction(() => window.completionRequests.length === 2);
+  await emit({ content: '保留的部分回答' });
+  await answer.getByText('保留的部分回答', { exact: true }).waitFor();
+  await id('stop').click();
+  await thought.getByText('已停止', { exact: true }).waitFor();
+  await answer.getByText('保留的部分回答', { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.completionAborted), true);
+  const followup = '合成样本：下一条问题';
+  await id('question').locator('textarea').fill(followup);
+  await id('send').click();
+  await visible('请先重新生成，或放弃已停止的这轮回答。新问题已保留。');
+  assert.equal(await id('question').locator('textarea').inputValue(), followup);
+  assert.equal(await page.evaluate(() => window.completionRequests.length), 2);
+  await answer.getByText('保留的部分回答', { exact: true }).waitFor();
+  await regenerate.click();
+  await page.waitForFunction(() => window.completionRequests.length === 3);
+  const requests = await page.evaluate(() => window.completionRequests);
+  assert.deepEqual(requests.map(({ messages }) => messages), Array(3).fill(request.messages));
+  await emit({ reasoning_content: '再次检查。' });
+  for (const content of answerChunks) await emit({ content });
+  await emit(null);
+  await copy.waitFor();
+  assert.equal(await id('messages').getByText(question, { exact: true }).count(), 1);
+  assert.equal(await id('question').locator('textarea').inputValue(), followup);
+  await id('send').click();
+  await page.waitForFunction(() => window.completionRequests.length === 4);
+  await emit({ content: '这段将被主动放弃' });
+  await id('answer-3').getByText('这段将被主动放弃', { exact: true }).waitFor();
+  await id('stop').click();
+  await id('discard-stopped-3').click();
+  await id('answer-3').waitFor({ state: 'hidden' });
+  await answer.getByRole('heading', { level: 2, name: '结果' }).waitFor();
+  await page.reload();
+  await id('answer-1').getByRole('heading', { level: 2, name: '结果' }).waitFor();
+  await id('thought-1').getByText(/已思考（用时 \d+ 秒）/).waitFor();
+  console.log('流式回答：实时推理、折叠与键盘展开、Markdown、复制、停止、重新生成、放弃和刷新均已验证');
+
   assert.deepEqual(externalRequests, []);
   assert.deepEqual(pageErrors, []);
   console.log('PASS：外部请求 0，页面异常 0');
